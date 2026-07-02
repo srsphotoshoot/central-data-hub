@@ -1,0 +1,11 @@
+credentials.json
+token.json
+.env
+*.db
+*.sqlite
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+data/ai_images/
+venv/

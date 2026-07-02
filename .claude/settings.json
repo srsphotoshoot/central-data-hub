@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "FileChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.file_path // empty' | { read -r f; [ -n \"$f\" ] && [ -f \"$f\" ] && jq -n --arg p \"$f\" --arg c \"$(cat \"$f\")\" '{\"hookSpecificOutput\":{\"hookEventName\":\"FileChanged\",\"additionalContext\":(\"File changed: \"+$p+\"\\n\\n\"+$c)}}'; } 2>/dev/null || true",
+            "statusMessage": "Reading changed file..."
+          }
+        ]
+      }
+    ]
+  }
+}

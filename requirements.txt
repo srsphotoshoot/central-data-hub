@@ -1,0 +1,15 @@
+psycopg2-binary
+pandas
+sqlalchemy
+requests
+fastapi
+uvicorn
+gunicorn
+python-dotenv
+torch
+faiss-cpu
+open-clip-torch
+opencv-python-headless
+python-multipart
+Pillow
+python-telegram-bot
