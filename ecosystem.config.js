@@ -11,6 +11,16 @@ module.exports = {
       }
     },
     {
+      name: "cdh-matcher-service",
+      script: "./venv/bin/python",
+      args: "matcher_server.py",
+      interpreter: "none",
+      env: {
+        NODE_ENV: "production",
+        KMP_DUPLICATE_LIB_OK: "TRUE"
+      }
+    },
+    {
       name: "cdh-worker",
       script: "./venv/bin/python",
       args: "worker.py",

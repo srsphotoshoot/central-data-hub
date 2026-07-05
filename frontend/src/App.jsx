@@ -1,8 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 
 // Inject admin key so the frontend can access the backend admin endpoints
 axios.defaults.headers.common['X-API-KEY'] = '22d3b2c0dae1ac2c50df8ce8be3c36c2159ab8cd0856eacb';
+// Without a timeout, a slow/overloaded backend leaves requests pending forever;
+// each 10s poll tick then piles new connections on top of the stuck ones instead
+// of failing fast, which is what was exhausting the backend's connection pool.
+axios.defaults.timeout = 8000;
 
 import { 
   Database, 
@@ -46,7 +50,7 @@ const getApiBase = () => {
   const host = window.location.hostname;
   // On any localhost/LAN port, talk directly to CDH backend (admin endpoints are blocked by nginx)
   if (host === 'localhost' || host === '127.0.0.1' || host.startsWith('192.168.')) {
-    return 'http://localhost:8000/api/v1';
+    return `http://${host}:8000/api/v1`;
   }
   // External URL (ngrok / tailscale) → route through Nginx /cdh-api/ (admin blocked intentionally)
   return `${window.location.protocol}//${window.location.host}/cdh-api/api/v1`;
@@ -142,7 +146,14 @@ function App() {
     }
   }, [view, selectedLogProcess, logType]);
 
+  const fetchInFlightRef = useRef(false);
+
   const fetchData = async () => {
+    // Skip this tick if the previous one is still pending — otherwise a slow
+    // backend causes every 10s interval to open a fresh batch of requests on
+    // top of the still-unanswered ones, snowballing into connection exhaustion.
+    if (fetchInFlightRef.current) return;
+    fetchInFlightRef.current = true;
     try {
       const [statsRes, rawRes, keysRes, rulesRes, transRes] = await Promise.allSettled([
         axios.get(`${API_BASE}/admin/stats`),
@@ -160,6 +171,7 @@ function App() {
       console.error("Failed to fetch dashboard data:", err);
     } finally {
       setLoading(false);
+      fetchInFlightRef.current = false;
     }
   };
 
@@ -1144,7 +1156,7 @@ function EcosystemDashboard({
   const fetchExplorerData = async () => {
     try {
       const endpoint = explorerType === 'processed' ? 'admin/transactions' : 'admin/raw';
-      const res = await axios.get(`http://localhost:8000/api/v1/${endpoint}`);
+      const res = await axios.get(`${API_BASE}/${endpoint}`);
       setExplorerData(res.data || []);
     } catch (err) {
       console.error("Failed to fetch explorer data:", err);

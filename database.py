@@ -20,7 +20,7 @@ if not is_sqlite:
     kwargs["max_overflow"] = 10
 
 engine = create_engine(
-    DATABASE_URL, 
+    DATABASE_URL,
     connect_args=connect_args,
     **kwargs
 )

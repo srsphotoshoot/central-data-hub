@@ -3433,5 +3433,235 @@
     "flat_synced": true,
     "ai_synced": true,
     "last_updated": 1782975327
+  },
+  "SRS-8848-GOLD": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1782977923
+  },
+  "SRS-8848-ONION": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1782977980
+  },
+  "SRS-8848-PEACH": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1782978031
+  },
+  "SRS-8850-ONION": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1782976630
+  },
+  "SRS-8849-GREY": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1783057788
+  },
+  "SRS-8849-GOLD": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1782976719
+  },
+  "SRS-8798-LAVENDER": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1783059011
+  },
+  "SRS-8798-BLUE": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1783059081
+  },
+  "SRS-8786-PISTA": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1783060309
+  },
+  "SRS-8786-ONION": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1783060355
+  },
+  "SRS-8851-PEACH": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1783060402
+  },
+  "SRS-8851-PISTA": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1783060451
+  },
+  "SRS-8789-BLUE ": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783061639
+  },
+  "SRS-8789-FIROZI": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1783061688
+  },
+  "SRS-8778-YELLOW": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1783066321
+  },
+  "SRS-8777-PINK": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1783064054
+  },
+  "SRS-8023-BLACK": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1783070674
+  },
+  "SRS-8540-RANI": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1783070730
+  },
+  "SRS-8858-LAVENDER": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1783067906
+  },
+  "SRS-8859-WINE": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1783066221
+  },
+  "SRS-8857-YELLOW": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1783066270
+  },
+  "SRS-7061-GAJRI": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783145953
+  },
+  "SRS-7061-GOLD": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783145989
+  },
+  "SRS-7061-PISTA": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783146028
+  },
+  "SRS-8773-GOLD": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783148639
+  },
+  "SRS-8773-SKY BLUE": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783148683
+  },
+  "SRS-8773-LAVENDER": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783148725
+  },
+  "SRS-7063-CREAM": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783147256
+  },
+  "SRS-7062-SKY BLUE": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783147296
+  },
+  "SRS-7062-CREAM": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783147335
+  },
+  "SRS-7062-PINK": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783147374
+  },
+  "SRS-7061-PINK": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783147416
+  },
+  "SRS-7061-PISTA GREEN": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783147446
+  },
+  "SRS-7072-2": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783233636
+  },
+  "SRS-7072-1": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783233675
+  },
+  "SRS-7071-1": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783233715
+  },
+  "SRS-7070-2": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783233745
+  },
+  "SRS-7070-1": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783233785
+  },
+  "SRS-7069-2": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783234955
+  },
+  "SRS-7069-1": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783234993
+  },
+  "SRS-7068-2": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783236195
+  },
+  "SRS-7068-1": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783236235
+  },
+  "SRS-7067-2": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783236275
+  },
+  "SRS-7067-1": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783236319
+  },
+  "SRS-7066-1": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783236355
+  },
+  "SRS-7065-1": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1783237549
   }
 }

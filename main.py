@@ -7,6 +7,10 @@ from ingestion import fetch_and_store_data
 from processing import process_raw_data
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
+import faulthandler
+import signal
+faulthandler.register(signal.SIGUSR1, all_threads=True)
 import os
 import uvicorn
 import datetime
@@ -17,8 +21,19 @@ from typing import List, Optional
 from dotenv import load_dotenv
 from PIL import Image
 from io import BytesIO
-from services.matcher_service import matcher
+import requests
 from services.production_engine import calculate_dashboard_analytics, randomize_simulated_data
+
+# The AI matcher (SigLIP model + FAISS index) runs in its own process
+# (matcher_server.py) so its CPU-bound inference can't starve this API's
+# event loop. These routes proxy to it — see MATCHER_SERVICE_URL below.
+MATCHER_SERVICE_URL = os.getenv("MATCHER_SERVICE_URL", "http://localhost:8001")
+
+
+def _proxy_to_matcher(method: str, path: str, **kwargs):
+    resp = requests.request(method, f"{MATCHER_SERVICE_URL}{path}", timeout=180, **kwargs)
+    resp.raise_for_status()
+    return resp.json()
 
 
 import logging
@@ -43,6 +58,8 @@ app.add_middleware(
         "http://localhost:5173",
         "http://localhost:3000",
         "http://127.0.0.1:5173",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
     ],
     allow_credentials=False,
     allow_methods=["*"],
@@ -145,17 +162,61 @@ def get_data(
         "items": [item.content for item in items]
     }
 
+TRANSACTIONS_CONTENT_SIZE_CAP = 200_000  # bytes; see comment below
+
+
 @app.get("/api/v1/admin/transactions")
 async def get_admin_transactions(limit: int = 50, db: Session = Depends(get_db), _auth: str = Depends(get_admin_key)):
     """Fetch all processed data grouped by project/source for the timeline."""
-    items = db.query(ProcessedData).order_by(ProcessedData.updated_at.desc()).limit(limit).all()
-    return [{
-        "id": item.id,
-        "category": item.category,
-        "entity_id": item.entity_id,
-        "content": item.content,
-        "updated_at": item.updated_at
-    } for item in items]
+    # Found via a SIGUSR1 faulthandler dump: a batch of `sales` rows each carry
+    # a ~3MB content JSON blob (root cause unclear, but consistently reproduced
+    # by the `sales_app` source). Decoding ~50 of these every 10s poll — via
+    # the ORM's automatic JSON deserialization — was materializing ~150MB of
+    # Python objects per request, which triggers a GC pause long/heavy enough
+    # to stall the whole interpreter (every thread, not just the event loop),
+    # freezing the entire API. This was the actual final cause of tonight's
+    # dashboard freeze, hiding underneath every other fix applied.
+    #
+    # Fix: check each row's raw content length via SQL (cheap, no decode)
+    # before deciding whether to deserialize it. Oversized rows get a small
+    # SQL-level json_extract instead of a full Python-side json.loads.
+    def _query():
+        rows = db.execute(text(
+            "SELECT id, category, entity_id, updated_at, content, LENGTH(content) AS content_len "
+            "FROM processed_data ORDER BY updated_at DESC LIMIT :limit"
+        ), {"limit": limit}).fetchall()
+
+        results = []
+        for row in rows:
+            if row.content_len and row.content_len > TRANSACTIONS_CONTENT_SIZE_CAP:
+                extracted = db.execute(text(
+                    "SELECT json_extract(content, '$._source') AS source, "
+                    "json_extract(content, '$.name') AS name, "
+                    "json_extract(content, '$.customer.name') AS customer_name, "
+                    "json_extract(content, '$.totalValue') AS total_value, "
+                    "json_array_length(content, '$.cart') AS cart_len "
+                    "FROM processed_data WHERE id = :id"
+                ), {"id": row.id}).fetchone()
+                content = {
+                    "_source": extracted.source,
+                    "_truncated": True,
+                    "_original_size_bytes": row.content_len,
+                    "name": extracted.name,
+                    "customer": {"name": extracted.customer_name} if extracted.customer_name else None,
+                    "totalValue": extracted.total_value,
+                    "cart": [None] * (extracted.cart_len or 0),
+                }
+            else:
+                content = json.loads(row.content) if row.content else None
+            results.append({
+                "id": row.id,
+                "category": row.category,
+                "entity_id": row.entity_id,
+                "content": content,
+                "updated_at": row.updated_at
+            })
+        return results
+    return await run_in_threadpool(_query)
 
 @app.post("/api/v1/webhook/{source}")
 async def receive_webhook(source: str, request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db), _auth: str = Depends(get_webhook_auth)):
@@ -188,23 +249,55 @@ async def receive_webhook(source: str, request: Request, background_tasks: Backg
 @app.get("/api/v1/admin/stats")
 async def get_admin_stats(db: Session = Depends(get_db), _auth: str = Depends(get_admin_key)):
     """Summary stats for the dashboard."""
-    raw_count = db.query(RawData).count()
-    processed_count = db.query(ProcessedData).count()
-    categories = db.query(ProcessedData.category).distinct().all()
-    
-    return {
-        "raw_count": raw_count,
-        "processed_count": processed_count,
-        "categories": [c[0] for c in categories],
-        "uptime": "100%", # Placeholder
-        "db_status": "connected"
-    }
+    def _query():
+        raw_count = db.query(RawData).count()
+        processed_count = db.query(ProcessedData).count()
+        categories = db.query(ProcessedData.category).distinct().all()
+        return {
+            "raw_count": raw_count,
+            "processed_count": processed_count,
+            "categories": [c[0] for c in categories],
+            "uptime": "100%", # Placeholder
+            "db_status": "connected"
+        }
+    return await run_in_threadpool(_query)
 
 @app.get("/api/v1/admin/raw")
 async def get_admin_raw_data(limit: int = 20, db: Session = Depends(get_db), _auth: str = Depends(get_admin_key)):
     """Latest raw data entries."""
-    items = db.query(RawData).order_by(RawData.received_at.desc()).limit(limit).all()
-    return items
+    # Same class of fix as /api/v1/admin/transactions: recent `sales_app` rows
+    # each carry a ~3MB `data` JSON blob, and this list (polled every 10s) was
+    # decoding the full payload for every row even though the frontend list
+    # view only renders id/source/endpoint/method/received_at — the full
+    # payload is only needed on-demand in the Payload Inspector for one
+    # clicked item. Skip decoding oversized payloads here; they get a small
+    # placeholder instead of triggering the multi-row GC-pause freeze.
+    def _query():
+        rows = db.execute(text(
+            "SELECT id, source, endpoint, method, headers, data, received_at, "
+            "is_processed, processed_at, LENGTH(data) AS data_len "
+            "FROM raw_data ORDER BY received_at DESC LIMIT :limit"
+        ), {"limit": limit}).fetchall()
+
+        results = []
+        for row in rows:
+            if row.data_len and row.data_len > TRANSACTIONS_CONTENT_SIZE_CAP:
+                data = {"_truncated": True, "_original_size_bytes": row.data_len}
+            else:
+                data = json.loads(row.data) if row.data else None
+            results.append({
+                "id": row.id,
+                "source": row.source,
+                "endpoint": row.endpoint,
+                "method": row.method,
+                "headers": json.loads(row.headers) if row.headers else None,
+                "data": data,
+                "received_at": row.received_at,
+                "is_processed": bool(row.is_processed),
+                "processed_at": row.processed_at
+            })
+        return results
+    return await run_in_threadpool(_query)
 
 @app.post("/api/v1/admin/ingest")
 async def trigger_ingest(endpoint: str = "/api/v1/test", db: Session = Depends(get_db), _auth: str = Depends(get_admin_key)):
@@ -231,29 +324,50 @@ import subprocess
 import json
 import urllib.request
 
+
+def _tail_file(path: str, limit: int) -> list:
+    # Reads only the tail of the file instead of the whole thing. Some PM2
+    # log files (notably cdh-backend's own) grow to tens of thousands of
+    # lines; reading the full file on every 3s poll from the log viewer was
+    # blocking the event loop and, since serving the request itself adds a
+    # new log line, the read cost kept growing — a self-reinforcing freeze.
+    chunk_size = max(limit * 300, 65536)
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        f.seek(max(0, size - chunk_size))
+        data = f.read()
+    lines = data.decode("utf-8", errors="ignore").splitlines()
+    return [line.strip() for line in lines[-limit:]]
+
+
+def _pm2_list_sync():
+    result = subprocess.run(["pm2", "jlist"], capture_output=True, text=True, check=True)
+    processes = json.loads(result.stdout)
+
+    filtered = []
+    for p in processes:
+        monit = p.get("monit", {})
+        pm_env = p.get("pm2_env", {})
+        filtered.append({
+            "id": p.get("pm_id"),
+            "name": p.get("name"),
+            "status": pm_env.get("status"),
+            "restarts": pm_env.get("restart_time", 0),
+            "uptime": pm_env.get("pm_uptime", 0),
+            "cpu": monit.get("cpu", 0),
+            "memory": monit.get("memory", 0),
+            "error_log": pm_env.get("pm_err_log_path"),
+            "out_log": pm_env.get("pm_out_log_path")
+        })
+    return filtered
+
+
 @app.get("/api/v1/admin/pm2/list")
 async def pm2_list(_auth: str = Depends(get_admin_key)):
     """Fetch live status of all system processes via PM2."""
     try:
-        result = subprocess.run(["pm2", "jlist"], capture_output=True, text=True, check=True)
-        processes = json.loads(result.stdout)
-        
-        filtered = []
-        for p in processes:
-            monit = p.get("monit", {})
-            pm_env = p.get("pm2_env", {})
-            filtered.append({
-                "id": p.get("pm_id"),
-                "name": p.get("name"),
-                "status": pm_env.get("status"),
-                "restarts": pm_env.get("restart_time", 0),
-                "uptime": pm_env.get("pm_uptime", 0),
-                "cpu": monit.get("cpu", 0),
-                "memory": monit.get("memory", 0),
-                "error_log": pm_env.get("pm_err_log_path"),
-                "out_log": pm_env.get("pm_out_log_path")
-            })
-        return filtered
+        return await run_in_threadpool(_pm2_list_sync)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PM2 Query failed: {str(e)}")
 
@@ -266,7 +380,10 @@ async def pm2_action(name: str, action: str, _auth: str = Depends(get_admin_key)
     if not _re.match(r'^[a-zA-Z0-9_\-\.]+$', name):
         raise HTTPException(status_code=400, detail="Invalid process name")
     try:
-        subprocess.run(["pm2", action, name], capture_output=True, text=True, check=True)
+        await run_in_threadpool(
+            subprocess.run, ["pm2", action, name],
+            capture_output=True, text=True, check=True
+        )
         return {"status": "success", "message": f"Process '{name}' {action}ed successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PM2 Action failed: {str(e)}")
@@ -277,33 +394,36 @@ async def pm2_logs(name: str, log_type: str = "out", limit: int = 150, _auth: st
     if log_type not in ["out", "err"]:
         raise HTTPException(status_code=400, detail="Invalid log type")
     try:
-        res = subprocess.run(["pm2", "jlist"], capture_output=True, text=True, check=True)
-        processes = json.loads(res.stdout)
-        target = next((p for p in processes if p.get("name") == name), None)
-        if not target:
+        def _read_logs():
+            processes = _pm2_list_sync()
+            target = next((p for p in processes if p.get("name") == name), None)
+            if not target:
+                return None
+            log_path = target.get("error_log" if log_type == "err" else "out_log")
+            if not log_path or not os.path.exists(log_path):
+                return {"logs": ["Log file is empty or does not exist yet."]}
+            return {"logs": _tail_file(log_path, limit)}
+
+        result = await run_in_threadpool(_read_logs)
+        if result is None:
             raise HTTPException(status_code=404, detail="Process not found")
-        
-        pm_env = target.get("pm2_env", {})
-        log_path = pm_env.get("pm_err_log_path" if log_type == "err" else "pm_out_log_path")
-        
-        if not log_path or not os.path.exists(log_path):
-            return {"logs": ["Log file is empty or does not exist yet."]}
-            
-        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-            recent_lines = lines[-limit:]
-            return {"logs": [line.strip() for line in recent_lines]}
+        return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read logs: {str(e)}")
 
 @app.get("/api/v1/admin/tunnel/status")
 async def tunnel_status(_auth: str = Depends(get_admin_key)):
     """Retrieve details of the active Ngrok Tunnel and Nginx mappings."""
-    try:
+    def _fetch_ngrok_url():
         with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=1.0) as response:
             tunnels = json.loads(response.read().decode()).get("tunnels", [])
-            public_url = next((t.get("public_url") for t in tunnels if t.get("proto") == "https"), None)
-    except:
+            return next((t.get("public_url") for t in tunnels if t.get("proto") == "https"), None)
+
+    try:
+        public_url = await run_in_threadpool(_fetch_ngrok_url)
+    except Exception:
         public_url = "https://napping-briskness-shimmy.ngrok-free.dev"
         
     return {
@@ -365,23 +485,12 @@ async def verify_dress(files: List[UploadFile] = File(...)):
     """
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
-    
-    pil_images = []
-    for file in files[:4]:
-        content = await file.read()
-        pil_images.append(Image.open(BytesIO(content)))
-    
-    similarity, matched_name, all_scores = matcher.search(pil_images)
-    
-    is_match = bool(similarity > 0.80)
-    
-    return {
-        "similarity": float(similarity),
-        "match": is_match,
-        "matched_product": matched_name if is_match else "Unknown Imposter",
-        "threshold": 0.80
-    }
 
+    file_payload = [("files", (f.filename, await f.read(), f.content_type)) for f in files[:4]]
+    try:
+        return await run_in_threadpool(_proxy_to_matcher, "POST", "/verify", files=file_payload)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=503, detail=f"Matcher service unavailable: {e}")
 
 
 @app.post("/api/v1/matcher/add")
@@ -394,22 +503,22 @@ async def add_dress_reference(
     """
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
-    
-    pil_images = []
-    for file in files:
-        content = await file.read()
-        pil_images.append(Image.open(BytesIO(content)))
-    
-    count = matcher.add_product(pil_images, product_name)
-    
-    return {
-        "status": "success",
-        "message": f"Successfully stored {len(pil_images)} reference images ({count} vectors) for '{product_name}'."
-    }
+
+    file_payload = [("files", (f.filename, await f.read(), f.content_type)) for f in files]
+    try:
+        return await run_in_threadpool(
+            _proxy_to_matcher, "POST", "/add",
+            data={"product_name": product_name}, files=file_payload
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=503, detail=f"Matcher service unavailable: {e}")
 
 @app.get("/api/v1/matcher/stats")
 async def get_matcher_stats():
-    return matcher.get_stats()
+    try:
+        return await run_in_threadpool(_proxy_to_matcher, "GET", "/stats")
+    except requests.RequestException as e:
+        raise HTTPException(status_code=503, detail=f"Matcher service unavailable: {e}")
 
 @app.get("/api/v1/matcher/sync_status")
 async def get_matcher_sync_status():
@@ -426,17 +535,24 @@ async def get_matcher_sync_status():
 
 @app.get("/api/v1/matcher/products")
 async def get_matcher_products():
-    return {"products": matcher.get_products()}
+    try:
+        return await run_in_threadpool(_proxy_to_matcher, "GET", "/products")
+    except requests.RequestException as e:
+        raise HTTPException(status_code=503, detail=f"Matcher service unavailable: {e}")
 
 @app.delete("/api/v1/matcher/products/{product_name}")
 async def delete_matcher_product(product_name: str):
     """
     Delete a product and all of its reference images from the matcher index.
     """
-    success = matcher.delete_product(product_name)
-    if not success:
-        raise HTTPException(status_code=404, detail=f"Product '{product_name}' not found in matcher database")
-    return {"status": "success", "message": f"Successfully deleted product '{product_name}' from matcher index."}
+    try:
+        return await run_in_threadpool(_proxy_to_matcher, "DELETE", f"/products/{product_name}")
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"Product '{product_name}' not found in matcher database")
+        raise HTTPException(status_code=503, detail=f"Matcher service unavailable: {e}")
+    except requests.RequestException as e:
+        raise HTTPException(status_code=503, detail=f"Matcher service unavailable: {e}")
 
 @app.delete("/api/v1/admin/rules/{rule_id}")
 async def delete_rule(rule_id: int, _auth: str = Depends(get_admin_key), db: Session = Depends(get_db)):

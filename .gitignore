@@ -9,3 +9,8 @@ __pycache__/
 .DS_Store
 data/ai_images/
 venv/
+
+*.log
+*.db-shm
+*.db-wal
+*.index
