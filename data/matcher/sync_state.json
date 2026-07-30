@@ -3546,8 +3546,8 @@
   },
   "SRS-7061-GOLD": {
     "flat_synced": true,
-    "ai_synced": false,
-    "last_updated": 1783145989
+    "ai_synced": true,
+    "last_updated": 1784099362
   },
   "SRS-7061-PISTA": {
     "flat_synced": true,
@@ -3556,18 +3556,18 @@
   },
   "SRS-8773-GOLD": {
     "flat_synced": true,
-    "ai_synced": false,
-    "last_updated": 1783148639
+    "ai_synced": true,
+    "last_updated": 1784100748
   },
   "SRS-8773-SKY BLUE": {
     "flat_synced": true,
-    "ai_synced": false,
-    "last_updated": 1783148683
+    "ai_synced": true,
+    "last_updated": 1784100757
   },
   "SRS-8773-LAVENDER": {
     "flat_synced": true,
-    "ai_synced": false,
-    "last_updated": 1783148725
+    "ai_synced": true,
+    "last_updated": 1784100767
   },
   "SRS-7063-CREAM": {
     "flat_synced": true,
@@ -3576,23 +3576,23 @@
   },
   "SRS-7062-SKY BLUE": {
     "flat_synced": true,
-    "ai_synced": false,
-    "last_updated": 1783147296
+    "ai_synced": true,
+    "last_updated": 1784100777
   },
   "SRS-7062-CREAM": {
     "flat_synced": true,
-    "ai_synced": false,
-    "last_updated": 1783147335
+    "ai_synced": true,
+    "last_updated": 1784100784
   },
   "SRS-7062-PINK": {
     "flat_synced": true,
-    "ai_synced": false,
-    "last_updated": 1783147374
+    "ai_synced": true,
+    "last_updated": 1784100792
   },
   "SRS-7061-PINK": {
     "flat_synced": true,
-    "ai_synced": false,
-    "last_updated": 1783147416
+    "ai_synced": true,
+    "last_updated": 1784099348
   },
   "SRS-7061-PISTA GREEN": {
     "flat_synced": true,
@@ -3663,5 +3663,35 @@
     "flat_synced": true,
     "ai_synced": false,
     "last_updated": 1783237549
+  },
+  "SRS-7063-FIROZI": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1784100663
+  },
+  "SRS-7039-PINK": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1784100739
+  },
+  "SRS-7066-2": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1784102019
+  },
+  "SRS-7064-2": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1784102063
+  },
+  "SRS-7064-1": {
+    "flat_synced": true,
+    "ai_synced": false,
+    "last_updated": 1784102115
+  },
+  "SRS-8540-BLACK": {
+    "flat_synced": true,
+    "ai_synced": true,
+    "last_updated": 1784113158
   }
 }
