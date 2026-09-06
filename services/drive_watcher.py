@@ -23,7 +23,23 @@ load_dotenv(os.path.join(cdh_path, ".env"))
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PARENT_FOLDER_ID = os.getenv("DRIVE_CATALOG_FOLDER_ID", "1qD743hkc_GWWw8bxdqhgzgeW6shquYHo")
-API_BASE         = "http://localhost:8000/api/v1/matcher"
+# Was http://localhost:8000/api/v1/matcher (main.py's proxy -> the LOCAL
+# matcher_server.py on :8001) — that only ever fed a throwaway local index,
+# never the real production one Sutra's app actually calls. Every ingest
+# silently landed nowhere useful whenever cdh-backend/cdh-matcher-service
+# weren't both up locally (confirmed: this daemon ran May-Jul 2026 with
+# weeks of unbroken "Flats Ingest FAILED" in its error log for exactly this
+# reason). Point straight at the deployed Cloud Run matcher instead — same
+# HF-Dataset-backed index (see services/hf_sync.py) sutra-v2-api's own
+# matcher connector calls, so a Drive upload now reaches the real thing with
+# no local process in between. Override via env for a genuinely local test.
+MATCHER_BASE_URL = os.getenv("DRIVE_SYNC_MATCHER_URL", "https://cdh-image-matcher-84407657314.asia-south1.run.app")
+API_BASE         = MATCHER_BASE_URL.rstrip("/")
+# Cloud Run's /add is gated by the same shared-secret X-API-Key every other
+# caller (incl. sutra-v2-api) uses — required now that we're calling it
+# directly instead of through main.py's (unauthenticated, localhost-only)
+# proxy.
+MATCHER_API_KEY  = os.getenv("MATCHER_API_KEY", "")
 SCAN_INTERVAL    = int(os.getenv("DRIVE_SCAN_INTERVAL_SEC", "900"))  # 15 min default
 TOKEN_FILE       = os.path.join(cdh_path, "token.json")
 SERVICE_ACCOUNT  = os.path.join(cdh_path, "service_account.json")
@@ -101,6 +117,37 @@ def list_files(service, parent_id):
         logger.error(f"list_files error: {e}")
         return []
 
+# Cloud Run/GFE rejects any request over ~32MB outright (413, before FastAPI
+# even sees it) — confirmed live 5 Sep 2026: SRS-8903's flat photos are
+# ~18-19MB each straight off Drive (full-res camera originals), so a single
+# 4-photo /add call landed at ~74MB and never had a chance. matcher_service's
+# own _preprocess_image already downsamples to MAX_DIM for SigLIP anyway, so
+# shipping the raw original bought nothing but this failure — resize+
+# re-encode client-side before it ever leaves this machine.
+UPLOAD_MAX_DIM = 1600
+UPLOAD_JPEG_QUALITY = 85
+
+
+def compress_for_upload(buf):
+    """Downsamples+re-encodes a downloaded image to a small JPEG so the
+    multipart /add request stays well under Cloud Run's request-size limit.
+    Falls back to the original bytes (rewound) if the image can't be decoded
+    — better to attempt the original and let the server-side error surface
+    than to silently drop a file."""
+    try:
+        img = Image.open(buf)
+        img = img.convert('RGB')
+        img.thumbnail((UPLOAD_MAX_DIM, UPLOAD_MAX_DIM), Image.LANCZOS)
+        out = io.BytesIO()
+        img.save(out, format='JPEG', quality=UPLOAD_JPEG_QUALITY)
+        out.seek(0)
+        return out
+    except Exception as e:
+        logger.warning(f"compress_for_upload failed, using original bytes: {e}")
+        buf.seek(0)
+        return buf
+
+
 def download_file(service, file_id):
     for attempt in range(3):
         try:
@@ -111,7 +158,7 @@ def download_file(service, file_id):
             while not done:
                 _, done = dl.next_chunk()
             buf.seek(0)
-            return buf
+            return compress_for_upload(buf)
         except Exception as e:
             wait = 5 * (2 ** attempt)
             logger.warning(f"Download retry {attempt+1}/3 for {file_id}: {e}. Waiting {wait}s...")
@@ -120,15 +167,27 @@ def download_file(service, file_id):
 
 # ── CDH API ───────────────────────────────────────────────────────────────────
 def ingest_product(product_name, files_payload):
+    headers = {'X-API-Key': MATCHER_API_KEY} if MATCHER_API_KEY else {}
     for attempt in range(3):
         try:
             r = requests.post(
                 f"{API_BASE}/add",
                 data={'product_name': product_name},
                 files=files_payload,
+                headers=headers,
+                # Cloud Run cold-starts can take ~90s before it even starts
+                # matching (see sutra-v2-api's matcher client comment) — give
+                # /add, which also runs the SigLIP model, the same room.
                 timeout=180
             )
-            return r.status_code == 200
+            if r.status_code != 200:
+                # This used to be silently swallowed as a bare False — the
+                # whole reason weeks of failures here went unnoticed. Log the
+                # real reason (401 = MATCHER_API_KEY missing/wrong, 5xx =
+                # cold-start/model error) so a failure is loud, not silent.
+                logger.error(f"    Ingest HTTP {r.status_code} for {product_name}: {r.text[:300]}")
+                return False
+            return True
         except Exception as e:
             wait = 5 * (2 ** attempt)
             logger.warning(f"Ingest retry {attempt+1}/3 for {product_name}: {e}. Waiting {wait}s...")
