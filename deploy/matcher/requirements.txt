@@ -11,3 +11,4 @@ rembg
 onnxruntime
 huggingface_hub
 requests
+opencv-python-headless

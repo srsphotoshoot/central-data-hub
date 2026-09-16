@@ -14,3 +14,11 @@ venv/
 *.db-shm
 *.db-wal
 *.index
+
+# Matcher thumbnails: ~1000 JPEGs (49MB) used by the ORB keypoint re-ranker.
+# Durable copy lives in the HF dataset repo (see services/hf_sync.py), not git.
+data/matcher/thumbnails/
+# Isolated test index built by scripts/test_experimental_matcher.py (10MB).
+data/matcher_test_experimental/
+# Timestamped state backups
+*.bak-*

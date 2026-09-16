@@ -3,8 +3,10 @@
 # deploy/matcher/README.md for how the source files get here before building.
 FROM python:3.11-slim
 
-# onnxruntime (used by rembg) needs libgomp1 on debian slim.
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+# onnxruntime (used by rembg) needs libgomp1 on debian slim. libglib2.0-0 is a common
+# runtime dependency of opencv-python-headless (added 2026-09-10 for the keypoint
+# re-ranker) even without any GUI features.
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

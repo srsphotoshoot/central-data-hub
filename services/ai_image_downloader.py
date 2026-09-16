@@ -27,7 +27,6 @@ os.makedirs(LOCAL_IMAGE_DIR, exist_ok=True)
 
 TOKEN_FILE = os.path.join(cdh_path, "token.json")
 SYNC_INTERVAL = 3600  # 1 hour
-
 def get_drive_service():
     if os.path.exists(TOKEN_FILE):
         try:

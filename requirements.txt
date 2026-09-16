@@ -13,3 +13,4 @@ opencv-python-headless
 python-multipart
 Pillow
 python-telegram-bot
+anthropic

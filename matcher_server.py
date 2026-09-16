@@ -20,7 +20,11 @@ from starlette.concurrency import run_in_threadpool
 from PIL import Image
 
 from services import hf_sync
-from services.matcher_service import INDEX_FILE, MAP_FILE, matcher
+from services.matcher_service import (
+    INDEX_FILE, MAP_FILE, THUMB_DIR,
+    KEYPOINT_RERANK_CLOSE_CALL_RATIO, MIN_INLIERS_FOR_KEYPOINT_VERIFIED,
+    matcher,
+)
 
 app = FastAPI(title="CDH Matcher Service")
 
@@ -56,6 +60,7 @@ async def flush_hf_on_shutdown():
     existed; only bounds the window, doesn't close it."""
     if hf_sync.ENABLED:
         await run_in_threadpool(hf_sync.push, INDEX_FILE, MAP_FILE)
+        await run_in_threadpool(hf_sync.push_thumbnails, THUMB_DIR)
 
 
 @app.get("/health")
@@ -76,11 +81,52 @@ async def verify_dress(files: List[UploadFile] = File(...)):
     similarity, matched_name, all_scores = await run_in_threadpool(matcher.search, pil_images)
     is_match = bool(similarity > 0.80)
 
+    # Confidence based on the MARGIN to the runner-up, not the raw similarity score.
+    # Diagnosed 2026-09-10 against real logged mismatches (learning_log.jsonl) and a
+    # 40-query random sample of the full catalog: raw similarity does NOT separate
+    # correct from incorrect picks (wrong picks reached 0.9528 while some correct
+    # picks scored as low as 0.9363 -- entirely overlapping ranges). The margin
+    # between the top pick and the runner-up is a much better signal (~2.5x larger
+    # on average for correct picks: ~0.030 vs ~0.012 for wrong ones), though still
+    # not perfect on its own -- treat "low" as "worth a second look", not "wrong".
+    # Reuses KEYPOINT_RERANK_CLOSE_CALL_RATIO so "low confidence" here means exactly
+    # the same thing as "close call" did when deciding whether to keypoint re-rank.
+    runner_up_name, runner_up_score = None, -1.0
+    for name, score in all_scores.items():
+        if name != matched_name and score > runner_up_score:
+            runner_up_name, runner_up_score = name, score
+    margin = float(similarity - runner_up_score) if runner_up_name is not None else None
+    is_close_call = (runner_up_name is not None and similarity > 0
+                      and runner_up_score / similarity >= KEYPOINT_RERANK_CLOSE_CALL_RATIO)
+
+    # Absolute keypoint sanity check on the top pick itself (distinct from the
+    # relative re-rank already applied inside matcher.search() for close calls).
+    # Diagnosed 2026-09-10: margin/confidence above only measures "how contested was
+    # this decision among catalog candidates" -- it says nothing about whether the
+    # query is actually IN the catalog at all. An out-of-catalog garment that lands
+    # at, say, 0.89 similarity with no other candidate close behind it would get
+    # "confidence": "high" from margin alone despite being a real mismatch. Only
+    # runs when is_match, since there's nothing useful to sanity-check otherwise.
+    keypoint_inliers = None
+    if is_match:
+        keypoint_inliers = await run_in_threadpool(matcher.verify_with_keypoints, pil_images, matched_name)
+    keypoint_verified = (keypoint_inliers >= MIN_INLIERS_FOR_KEYPOINT_VERIFIED) if keypoint_inliers is not None else None
+
+    confidence = "low" if is_close_call else "high"
+    if keypoint_verified is False:  # explicit check, not just falsy -- None means "couldn't check"
+        confidence = "low"
+
     return {
         "similarity": float(similarity),
         "match": is_match,
         "matched_product": matched_name if is_match else "Unknown Imposter",
-        "threshold": 0.80
+        "threshold": 0.80,
+        "confidence": confidence,
+        "margin": margin,
+        "runner_up_product": runner_up_name,
+        "runner_up_similarity": float(runner_up_score) if runner_up_name is not None else None,
+        "keypoint_verified": keypoint_verified,
+        "keypoint_inliers": keypoint_inliers,
     }
 
 
@@ -121,7 +167,7 @@ async def add_dress_reference(
     # THIS response), so drive_watcher.py will simply retry it on a later
     # scan; nothing upstream treats this response as the last word.
     count = await run_in_threadpool(matcher.add_product, pil_images, product_name)
-    background_tasks.add_task(hf_sync.mark_dirty, INDEX_FILE, MAP_FILE)
+    background_tasks.add_task(hf_sync.mark_dirty, INDEX_FILE, MAP_FILE, THUMB_DIR)
 
     return {
         "status": "success",
@@ -145,7 +191,7 @@ async def delete_matcher_product(product_name: str, background_tasks: Background
     if not success:
         raise HTTPException(status_code=404, detail=f"Product '{product_name}' not found in matcher database")
     # Same async-push pattern as /add above.
-    background_tasks.add_task(hf_sync.mark_dirty, INDEX_FILE, MAP_FILE)
+    background_tasks.add_task(hf_sync.mark_dirty, INDEX_FILE, MAP_FILE, THUMB_DIR)
     return {"status": "success", "message": f"Successfully deleted product '{product_name}' from matcher index."}
 
 

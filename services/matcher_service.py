@@ -1,8 +1,11 @@
 import os
 import json
+import base64
+import threading
 import torch
 import open_clip
 import faiss
+import cv2
 import numpy as np
 from PIL import Image, ImageEnhance, ImageOps
 import torch.nn.functional as F
@@ -28,9 +31,42 @@ MODEL_NAME = "hf-hub:Marqo/marqo-fashionSigLIP"
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "matcher")
 INDEX_FILE = os.path.join(DATA_DIR, "dress_db.index")
 MAP_FILE = os.path.join(DATA_DIR, "dress_labels.json")
+# One representative reference photo per product, kept ONLY so the keypoint re-ranker
+# (see _keypoint_rerank) has something to compare against for a close-call tie —
+# the matcher itself never needed original images, only embeddings, until this.
+# Synced to/from the HF dataset repo alongside the index+labels (see hf_sync.py) since
+# Cloud Run has no durable local disk across restarts.
+THUMB_DIR = os.path.join(DATA_DIR, "thumbnails")
 
-# Ensure data directory exists
+# Ensure data directories exist
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(THUMB_DIR, exist_ok=True)
+
+# Runner-up must score at least this fraction of the top pick's score to count as a
+# "close call" worth a keypoint re-rank. Validated 2026-09-10 on the 30 most mutually-
+# confusable designs in the real catalog (held-out real photos, n=84): pure embedding
+# argmax got 84.5% (71/84); adding this cross-design-only keypoint re-rank raised it to
+# 85.7% (72/84). Do NOT also re-rank same-base-design ties (see _keypoint_rerank) —
+# ORB runs on a grayscale conversion, so two colorways of the identical embroidery/
+# weave pattern look the same to it and it only adds noise there (confirmed: 3 of the
+# first 8 regressions before this guard were exactly that).
+KEYPOINT_RERANK_CLOSE_CALL_RATIO = 0.97
+
+# Minimum ORB inlier count (see _best_orb_score) for the top pick to count as
+# "keypoint-verified" — an absolute sanity check on a SINGLE candidate, distinct from
+# _keypoint_rerank's relative comparison between two close candidates. Added
+# 2026-09-10 to catch the case a margin-based confidence can't: an out-of-catalog
+# garment that happens to land close to one catalog item on embedding similarity
+# alone (e.g. 0.89, with no other candidate close enough to look like a "close call")
+# would otherwise be reported as a confident match. Threshold picked from the same
+# 2026-09-10 measurements used to validate _keypoint_rerank: wrong/different-design
+# pairs topped out at ~12 inliers even under brightness/rotation variation, while
+# genuine matches (same augmentations) never dropped below ~570 — 30 sits with wide
+# margin on both sides of that gap, favoring NOT falsely flagging a real match over
+# catching every possible false one. Unvalidated against real customer photos (only
+# synthetic augmentation + real catalog photos so far) — a starting point, not a
+# tuned number; revisit if real usage shows it firing on genuine matches.
+MIN_INLIERS_FOR_KEYPOINT_VERIFIED = 30
 
 # Comprehensive product-to-standard color mappings for offline tie-breaking
 COLOR_MAP = {
@@ -117,6 +153,19 @@ class MatcherService:
             # runs once per process; local disk is authoritative after that.
             if not self._hf_pulled:
                 hf_sync.pull(INDEX_FILE, MAP_FILE)
+                # Thumbnails pulled in the BACKGROUND, not inline here. Diagnosed
+                # 2026-09-10: pulling all ~1000 individual thumbnail files via
+                # snapshot_download blocked the container from ever binding to its
+                # port, and Cloud Run's startup probe killed it (timed out at 88%,
+                # ~3.5 minutes in) — a failed deploy, though the previous revision
+                # kept serving traffic throughout (Cloud Run never cuts over to a
+                # revision that fails its startup probe). _keypoint_rerank already
+                # degrades gracefully when a thumbnail is missing (falls back to the
+                # embedding-only pick), so search/verify stay fully functional while
+                # this catches up in the background after a cold start — the
+                # keypoint re-rank benefit just "warms up" over the following
+                # couple of minutes instead of gating the whole service on it.
+                threading.Thread(target=hf_sync.pull_thumbnails, args=(THUMB_DIR,), daemon=True).start()
                 self._hf_pulled = True
 
             # Backward Compatibility: Check dimension
@@ -325,10 +374,148 @@ class MatcherService:
         ]
         return [self._get_combined_embedding(v) for v in variants]
 
+    def _base_design_code(self, product_name):
+        """'SRS-7042-GOLD' -> 'SRS-7042'. Product names are always
+        '<PREFIX>-<code>-<color...>', and the code itself never contains a '-', so
+        splitting on the first two hyphens reliably isolates the design from its
+        colorway. Used by _keypoint_rerank to avoid re-ranking same-design ties (see
+        its docstring) — keypoint matching runs on a grayscale image and can't tell
+        two colorways of the identical embroidery/weave pattern apart."""
+        parts = product_name.split('-', 2)
+        return f"{parts[0]}-{parts[1]}" if len(parts) >= 2 else product_name
+
+    def _thumbnail_path(self, product_name):
+        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in product_name)
+        return os.path.join(THUMB_DIR, f"{safe}.jpg")
+
+    def _save_thumbnail_if_missing(self, product_name, pil_image):
+        """Keep ONE original (unpreprocessed) reference photo per product as a small
+        JPEG, purely for _keypoint_rerank to compare against later — first-come only,
+        never overwritten, so this stays cheap even on repeated adds."""
+        path = self._thumbnail_path(product_name)
+        if os.path.exists(path):
+            return
+        try:
+            thumb = pil_image.convert("RGB")
+            thumb.thumbnail((512, 512), Image.LANCZOS)
+            thumb.save(path, "JPEG", quality=85)
+        except Exception as e:
+            logger.error(f"Failed to save thumbnail for {product_name}: {str(e)}")
+
+    def _load_thumbnail_pil(self, product_name):
+        path = self._thumbnail_path(product_name)
+        if not os.path.exists(path):
+            return None
+        try:
+            return Image.open(path).convert("RGB")
+        except Exception as e:
+            logger.error(f"Failed to load thumbnail for {product_name}: {str(e)}")
+            return None
+
+    def _orb_inlier_count(self, pil_a, pil_b, max_dim=600, nfeatures=1500):
+        """ORB keypoint detection + ratio-test matching + RANSAC homography, returning
+        the number of geometrically-consistent inlier matches between two images —
+        a much sharper same-design-or-not signal than a single embedding similarity
+        score for images with strong local texture (embroidery, beadwork)."""
+        def to_gray_cv(pil_img):
+            im = pil_img.convert("L")
+            im.thumbnail((max_dim, max_dim), Image.LANCZOS)
+            return np.array(im)
+
+        a, b = to_gray_cv(pil_a), to_gray_cv(pil_b)
+        orb = cv2.ORB_create(nfeatures=nfeatures)
+        kp1, des1 = orb.detectAndCompute(a, None)
+        kp2, des2 = orb.detectAndCompute(b, None)
+        if des1 is None or des2 is None or len(kp1) < 8 or len(kp2) < 8:
+            return 0
+
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+        matches = bf.knnMatch(des1, des2, k=2)
+        # Lowe's ratio test — keep a match only if it's clearly better than the next-best.
+        # Guard len(pair) == 2: knnMatch can return fewer than k candidates for a
+        # descriptor when the other image has very few keypoints.
+        good = [pair[0] for pair in matches if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance]
+        if len(good) < 4:
+            return len(good)
+
+        src = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+        dst = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+        _, mask = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
+        return int(mask.sum()) if mask is not None else 0
+
+    def _best_orb_score(self, query_img, candidate_img):
+        """Max of matching the candidate as-is vs. mirrored — ORB descriptors aren't
+        mirror-invariant on their own (a horizontally mirrored query collapsed to
+        near-zero inliers against its own true match without this check)."""
+        return max(
+            self._orb_inlier_count(query_img, candidate_img),
+            self._orb_inlier_count(query_img, ImageOps.mirror(candidate_img)),
+        )
+
+    def _keypoint_rerank(self, pil_images, product_a, product_b):
+        """
+        Free, local, zero-API-cost tie-break for two candidates the embedding search
+        left in a near-tie (see the trigger in search()). Re-runs the same background-
+        removal + fabric-block preprocessing used for embeddings on the query and on
+        each candidate's stored thumbnail, so the keypoint match compares embroidery-
+        focused, background-free patches instead of picking up spurious matches from
+        shared studio backdrops.
+
+        NEVER raises and only ever returns product_a or product_b — any failure
+        (missing thumbnail, OpenCV error) falls back to product_a (the embedding's
+        own top pick), so this can only help or be neutral, never break a query.
+        """
+        try:
+            thumb_a_pil = self._load_thumbnail_pil(product_a)
+            thumb_b_pil = self._load_thumbnail_pil(product_b)
+            if thumb_a_pil is None or thumb_b_pil is None:
+                logger.info("Keypoint re-rank skipped: missing thumbnail for one/both candidates")
+                return product_a
+
+            query_processed = self._preprocess_image(pil_images[0])
+            a_processed = self._preprocess_image(thumb_a_pil)
+            b_processed = self._preprocess_image(thumb_b_pil)
+
+            score_a = self._best_orb_score(query_processed, a_processed)
+            score_b = self._best_orb_score(query_processed, b_processed)
+            logger.info(f"Keypoint re-rank: {product_a}={score_a} inliers vs {product_b}={score_b} inliers")
+            return product_b if score_b > score_a else product_a
+        except Exception as e:
+            logger.error(f"Keypoint re-rank failed, falling back to embedding pick: {str(e)}")
+            return product_a
+
+    def verify_with_keypoints(self, pil_images, product_name):
+        """
+        Absolute (not relative) keypoint sanity check on a SINGLE candidate —
+        different from _keypoint_rerank, which only ever compares two close
+        candidates against each other. This answers "does the fine detail actually
+        support this being the same design", which margin-based confidence cannot:
+        an out-of-catalog garment can land at, say, 0.89 similarity against one
+        catalog item with no other candidate close enough to look like a "close
+        call" — margin alone would call that confident. A low inlier count here is
+        real evidence the match is wrong regardless of how the embedding score
+        looked, or how uncontested it was among catalog candidates.
+
+        Returns an int inlier count, or None if no thumbnail is available for
+        product_name (verification skipped, not failed) or on any internal error —
+        callers should treat None as "couldn't check", not "check failed".
+        """
+        try:
+            thumb_pil = self._load_thumbnail_pil(product_name)
+            if thumb_pil is None:
+                return None
+            query_processed = self._preprocess_image(pil_images[0])
+            candidate_processed = self._preprocess_image(thumb_pil)
+            return self._best_orb_score(query_processed, candidate_processed)
+        except Exception as e:
+            logger.error(f"Keypoint sanity check failed for {product_name}: {str(e)}")
+            return None
+
     def add_product(self, pil_images, product_name):
         """Add one or more images for a product to the index, preprocessing them first."""
         total_embs = 0
         for img in pil_images:
+            self._save_thumbnail_if_missing(product_name, img)
             # Preprocess the original image once
             processed_img = self._preprocess_image(img)
             augmented_embs = self.get_augmented_embeddings(processed_img)
@@ -407,6 +594,33 @@ class MatcherService:
         best_product = max(product_final, key=product_final.get)
         best_score = product_final[best_product]
 
+        # Free, local keypoint tie-break for genuinely close calls between DIFFERENT
+        # designs. Validated 2026-09-10 on the 30 most mutually-confusable designs in
+        # the real catalog (held-out real photos, n=84): raised accuracy from 84.5%
+        # (71/84, pure embedding) to 85.7% (72/84). Restricted to cross-design ties
+        # only — same-design colorway ties are deliberately excluded, see
+        # _keypoint_rerank's docstring for why (grayscale ORB can't tell colorways
+        # of the same embroidery pattern apart, and was measured actively harmful
+        # there). An AI zero-shot color classifier was also tried as a re-ranker here
+        # and measured to be badly harmful (63.1% on the same test) — do not re-add
+        # it without new evidence; see matcher_service_experimental.py's history for
+        # the full ablation if this needs revisiting.
+        runner_up, runner_up_score = None, -1.0
+        for p, s in product_final.items():
+            if p != best_product and s > runner_up_score:
+                runner_up, runner_up_score = p, s
+
+        is_cross_design = (runner_up is not None
+                            and self._base_design_code(best_product) != self._base_design_code(runner_up))
+
+        if is_cross_design and best_score > 0 and runner_up_score / best_score >= KEYPOINT_RERANK_CLOSE_CALL_RATIO:
+            logger.info(f"Close call ({best_product}={best_score:.4f} vs {runner_up}={runner_up_score:.4f}) — invoking keypoint re-rank")
+            reranked = self._keypoint_rerank(pil_images, best_product, runner_up)
+            if reranked != best_product:
+                logger.info(f"Keypoint re-rank overrode embedding pick: {best_product} -> {reranked}")
+                best_product = reranked
+                best_score = product_final[best_product]
+
         logger.info(f"Top matches: {sorted(product_final.items(), key=lambda x: x[1], reverse=True)[:5]}"); return best_score, best_product, product_final
 
     def get_stats(self):
@@ -457,6 +671,14 @@ class MatcherService:
             
         self.id_to_name_map = new_id_to_name_map
         self.current_id = new_id
+
+        # Clean up the now-orphaned thumbnail too, best-effort.
+        try:
+            thumb_path = self._thumbnail_path(product_name)
+            if os.path.exists(thumb_path):
+                os.remove(thumb_path)
+        except Exception as e:
+            logger.error(f"Failed to remove thumbnail for deleted product {product_name}: {str(e)}")
 
         # Local-only save — see add_product's matching comment; the HTTP
         # caller (matcher_server.py's DELETE handler) schedules the HF push.
