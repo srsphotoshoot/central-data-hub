@@ -24,3 +24,5 @@ data/matcher_test_experimental/
 *.bak-*
 # Real-photo eval set built by scripts/build_real_photo_evalset.py (large JPEGs + embeddings)
 data/matcher_eval/
+# Scratch index built by the 4-angle re-ingest (60MB+), swapped into data/matcher/ once evaluated
+data/matcher_v2/
