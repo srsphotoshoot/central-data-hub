@@ -1,11 +1,22 @@
 """
-One-off recovery script: rebuilds the matcher's FAISS index from scratch by
-walking the same Google Drive catalog structure as import_catalog_from_drive.py,
-downloading each product/color's AI reference images, and feeding them straight
-into services.matcher_service.matcher.add_product() (in-process, no HTTP hop).
+Rebuilds the matcher's FAISS index from scratch by walking the Google Drive catalog and
+feeding every reference photo of each product/colour into add_product() in-process.
+
+As of 2026-09-16 this ingests ALL of a colourway's photos, not just the AI render:
+the render, the four real photographed angles (f/b/l/r) from the colour folder, and the
+lc/ close-ups. See collect_style_variants for how each source is found and why. The
+render alone left the index unable to recognise a garment from its sides -- 37.4% on a
+left-side query against 82.4% on a front one; all four angles together took the average
+from 56.9% to 83.0%.
 
 Resumable: skips any product_name already present in the index (checked via
 matcher.get_products()), so it can be safely re-run after an interruption.
+
+Build somewhere else first. A full re-ingest is several hours and replaces what the
+matcher serves, so point it at a scratch directory, evaluate that index with
+scripts/leave_one_angle_out.py, and only then swap it in:
+
+    MATCHER_DATA_DIR=$PWD/data/matcher_v2 ./venv/bin/python scripts/rebuild_matcher_index.py
 
 Usage:
     ./venv/bin/python scripts/rebuild_matcher_index.py [--limit N]
@@ -17,6 +28,8 @@ import sys
 import time
 import argparse
 import logging
+import difflib
+from datetime import datetime
 
 import requests
 from googleapiclient.discovery import build
@@ -83,7 +96,7 @@ def list_folders(service, parent_id):
 def list_images(service, parent_id):
     r = api_call(lambda: service.files().list(
         q=f"'{parent_id}' in parents and trashed=false",
-        fields="files(id, name, mimeType)"
+        fields="files(id, name, mimeType, imageMediaMetadata(time))"
     ).execute())
     files = r.get('files', [])
     return [f for f in files
@@ -94,6 +107,28 @@ def list_images(service, parent_id):
 def is_ai_folder(name):
     n = name.upper()
     return n == "AI" or n.endswith("-AI") or n.endswith(" AI") or "-AI-" in n
+
+
+LC_FOLDER_NAMES = {"LC"}
+# How far apart a close-up and a colour's own photos may be shot and still be treated as
+# the same colourway. The shoot runs colour by colour with roughly ten minutes per colour,
+# so five is comfortably inside one colour's block without reaching the next.
+LC_MAX_GAP_MINUTES = 5
+
+
+def shot_time(f):
+    """EXIF capture time, or None. Used to attach lc/ close-ups to a colourway."""
+    t = (f.get('imageMediaMetadata') or {}).get('time')
+    if not t:
+        return None
+    try:
+        return datetime.strptime(t, "%Y:%m:%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def is_lc_folder(name):
+    return name.strip().upper() in LC_FOLDER_NAMES
 
 
 def color_from_filename(filename):
@@ -113,8 +148,26 @@ def download_image(service, file_id):
 
 
 def collect_style_variants(service, style):
-    """Returns {color: [file_id, ...]} for one style folder, same logic as
-    import_catalog_from_drive.py's two supported Drive layouts."""
+    """Returns {color: [file_id, ...]} for one style folder, merging three sources.
+
+    Until 2026-09-16 only the first of these was ingested, so every colourway was
+    represented by a single synthetic render. Measured effect of that: a front-view query
+    matched 82.4% of the time but a left-side view only 37.4%, because no photograph of
+    the garment's sides was ever in the index. Adding the real angles took the average
+    across all four viewpoints from 56.9% to 83.0% (see TODAY.md, "THE ANGLE FINDING").
+
+      ai/          the synthetic render. Structure A: <style>/ai/<colour>.png,
+                   Structure B: <style>/<colour>/ai/... . Kept -- it is the view that
+                   matches a front-facing query best, and angles are additive, not
+                   interchangeable.
+      <colour>/    the real photographed angles, f/b/l/r.JPG, sitting directly in each
+                   colour folder.
+      lc/          close-ups. Their filenames are all just "up.JPG"/"down.JPG" with no
+                   colour in them, so each is attached to whichever colour has the
+                   nearest photo by EXIF shot time (see shot_time / LC_MAX_GAP_MINUTES).
+                   Anything outside that window is skipped rather than guessed, since a
+                   wrong attachment is label noise in the index.
+    """
     subfolders = list_folders(service, style['id'])
     variants_map = {}
 
@@ -127,11 +180,37 @@ def collect_style_variants(service, style):
         except Exception as e:
             logger.warning(f"  Structure-A listing failed for {style['name']}: {e}")
 
+    # Colour keys from ai/ come from the FILE name, colour keys from the subfolders come
+    # from the FOLDER name, and the two disagree often enough to matter: SRS-8693 has an
+    # "off white" folder whose render is named "offf white.png", and a "lavendar" folder
+    # against a "lavender" render. Taken literally that splits one colourway into two
+    # products and the real photos never join their own render. So a folder name is
+    # snapped to an existing ai/-derived key when it is clearly the same colour, and the
+    # ai/ spelling wins -- it is what is already indexed and what /verify already returns.
+    ai_colors = list(variants_map)
+
+    def canonical_color(folder_name):
+        name = folder_name.strip().upper()
+        if name in variants_map:
+            return name
+        close = difflib.get_close_matches(name, ai_colors, n=1, cutoff=0.7)
+        if close and close[0] != name:
+            logger.info(f"  {style['name']}: folder '{folder_name}' -> '{close[0]}' (matched to ai/ spelling)")
+        return close[0] if close else name
+
+    colour_times = {}
     for color_sf in subfolders:
-        if is_ai_folder(color_sf['name']):
+        if is_ai_folder(color_sf['name']) or is_lc_folder(color_sf['name']):
             continue
-        color_name = color_sf['name'].upper()
+        color_name = canonical_color(color_sf['name'])
         try:
+            direct = list_images(service, color_sf['id'])
+            for f in direct:
+                variants_map.setdefault(color_name, []).append(f['id'])
+            times = [t for t in (shot_time(f) for f in direct) if t]
+            if times:
+                colour_times[color_name] = times
+
             color_subs = list_folders(service, color_sf['id'])
             nested_ai = next((c for c in color_subs if is_ai_folder(c['name'])), None)
             if nested_ai:
@@ -139,6 +218,28 @@ def collect_style_variants(service, style):
                     variants_map.setdefault(color_name, []).append(f['id'])
         except Exception as e:
             logger.warning(f"  Structure-B listing failed for {style['name']}/{color_sf['name']}: {e}")
+
+    lc_folder = next((sf for sf in subfolders if is_lc_folder(sf['name'])), None)
+    if lc_folder and colour_times:
+        skipped = 0
+        try:
+            for f in list_images(service, lc_folder['id']):
+                t = shot_time(f)
+                if not t:
+                    skipped += 1
+                    continue
+                colour, gap = min(
+                    ((c, min(abs((t - x).total_seconds()) for x in ts))
+                     for c, ts in colour_times.items()),
+                    key=lambda z: z[1])
+                if gap > LC_MAX_GAP_MINUTES * 60:
+                    skipped += 1
+                    continue
+                variants_map.setdefault(colour, []).append(f['id'])
+            if skipped:
+                logger.info(f"  {style['name']}: {skipped} close-up(s) unassigned (no EXIF, or >{LC_MAX_GAP_MINUTES}min from any colour)")
+        except Exception as e:
+            logger.warning(f"  lc/ listing failed for {style['name']}: {e}")
 
     return variants_map
 

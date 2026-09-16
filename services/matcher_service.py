@@ -28,7 +28,13 @@ DIMENSION = 768 # Full Image only (Pose Invariant)
 # the 2026-09-05 recovery, and this also makes the service portable to any host (e.g. a
 # Hugging Face Space) with zero local-path assumptions.
 MODEL_NAME = "hf-hub:Marqo/marqo-fashionSigLIP"
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "matcher")
+# Overridable so a full re-ingest can build a fresh index in a scratch directory while the
+# live one keeps serving, then be swapped in only once it has been evaluated (see
+# scripts/rebuild_matcher_index.py). Unset everywhere in production, so the default path
+# is what the server and every existing caller use.
+DATA_DIR = os.environ.get(
+    "MATCHER_DATA_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "matcher"))
 INDEX_FILE = os.path.join(DATA_DIR, "dress_db.index")
 MAP_FILE = os.path.join(DATA_DIR, "dress_labels.json")
 # One representative reference photo per product, kept ONLY so the keypoint re-ranker
