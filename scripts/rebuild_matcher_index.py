@@ -98,7 +98,7 @@ def list_folders(service, parent_id):
 def list_images(service, parent_id):
     r = api_call(lambda: service.files().list(
         q=f"'{parent_id}' in parents and trashed=false",
-        fields="files(id, name, mimeType, imageMediaMetadata(time))"
+        fields="files(id, name, mimeType, imageMediaMetadata(time), thumbnailLink)"
     ).execute())
     files = r.get('files', [])
     return [f for f in files
@@ -138,7 +138,39 @@ def color_from_filename(filename):
     return (root if ext.lower() in IMAGE_EXTS else filename).upper()
 
 
-def download_image(service, file_id):
+# Fetch Drive's own rendition rather than the original file. The originals are DSLR frames
+# of ~16MB; seven per colourway is ~110MB, and the re-ingest profiled at ~20s of downloading
+# against ~5s of actual work -- bandwidth-bound, so more parallel workers bought nothing.
+# _preprocess_image downscales everything to 1024px on the long edge as its very first step,
+# so nearly all of those bytes were fetched only to be discarded.
+#
+# Measured on 3 real catalogue photos -- cosine of the resulting embedding against the
+# full-resolution download:
+#     full   16.13MB  2.89s  1.00000
+#     s1024   0.17MB  0.78s  0.98007
+#     s1600   0.39MB  0.75s  0.99345
+#     s2048   0.60MB  1.48s  0.99730   <- chosen
+#     s4096   1.85MB  2.22s  0.99504
+# s1024 is too lossy for an index where 0.97 already counts as a close call. s2048 is
+# effectively indistinguishable, 27x smaller, and takes the run from ~26s to ~7s per
+# colourway. Use it for a WHOLE rebuild, never for part of one: mixing renditions with
+# full-resolution files leaves a systematic 0.27% offset across half the catalogue, against
+# typical winning margins of 0.02-0.03.
+THUMBNAIL_SIZE = int(os.environ.get("REBUILD_THUMBNAIL_SIZE", "2048"))
+
+
+def download_image(service, file_id, thumbnail_link=None):
+    """Prefer Drive's rendition at THUMBNAIL_SIZE; fall back to the original file when the
+    link is absent (not every file has one) or the fetch fails."""
+    if THUMBNAIL_SIZE and thumbnail_link:
+        try:
+            url = re.sub(r"=s\d+.*$", f"=s{THUMBNAIL_SIZE}", thumbnail_link)
+            r = requests.get(url, timeout=90)
+            r.raise_for_status()
+            return Image.open(io.BytesIO(r.content)).convert("RGB")
+        except Exception as e:
+            logger.warning(f"  thumbnail fetch failed for {file_id} ({e}); falling back to full download")
+
     request = service.files().get_media(fileId=file_id)
     buf = io.BytesIO()
     downloader = MediaIoBaseDownload(buf, request)
@@ -173,10 +205,10 @@ def download_images(file_ids):
     driving this further than a handful of workers."""
     out = [None] * len(file_ids)
 
-    def fetch(i_fid):
-        i, fid = i_fid
+    def fetch(i_entry):
+        i, (fid, tlink) = i_entry
         try:
-            return i, download_image(thread_service(), fid)
+            return i, download_image(thread_service(), fid, tlink)
         except Exception as e:
             logger.warning(f"  Failed to download image {fid}: {e}")
             return i, None
@@ -216,7 +248,7 @@ def collect_style_variants(service, style):
         try:
             for f in list_images(service, ai_folder['id']):
                 color = color_from_filename(f['name'])
-                variants_map.setdefault(color, []).append(f['id'])
+                variants_map.setdefault(color, []).append((f['id'], f.get('thumbnailLink')))
         except Exception as e:
             logger.warning(f"  Structure-A listing failed for {style['name']}: {e}")
 
@@ -246,7 +278,7 @@ def collect_style_variants(service, style):
         try:
             direct = list_images(service, color_sf['id'])
             for f in direct:
-                variants_map.setdefault(color_name, []).append(f['id'])
+                variants_map.setdefault(color_name, []).append((f['id'], f.get('thumbnailLink')))
             times = [t for t in (shot_time(f) for f in direct) if t]
             if times:
                 colour_times[color_name] = times
@@ -255,7 +287,7 @@ def collect_style_variants(service, style):
             nested_ai = next((c for c in color_subs if is_ai_folder(c['name'])), None)
             if nested_ai:
                 for f in list_images(service, nested_ai['id']):
-                    variants_map.setdefault(color_name, []).append(f['id'])
+                    variants_map.setdefault(color_name, []).append((f['id'], f.get('thumbnailLink')))
         except Exception as e:
             logger.warning(f"  Structure-B listing failed for {style['name']}/{color_sf['name']}: {e}")
 
@@ -275,7 +307,7 @@ def collect_style_variants(service, style):
                 if gap > LC_MAX_GAP_MINUTES * 60:
                     skipped += 1
                     continue
-                variants_map.setdefault(colour, []).append(f['id'])
+                variants_map.setdefault(colour, []).append((f['id'], f.get('thumbnailLink')))
             if skipped:
                 logger.info(f"  {style['name']}: {skipped} close-up(s) unassigned (no EXIF, or >{LC_MAX_GAP_MINUTES}min from any colour)")
         except Exception as e:
