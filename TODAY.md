@@ -336,3 +336,38 @@ Two cases worse, design accuracy identical. `_preprocess_image` already crops
 20%/15% inward, so a close-up ends up as an extreme zoom that no longer resembles
 a full-garment query. Not worth doubling the ingest. Keep the script — it works,
 and the EXIF trick is reusable if close-ups are ever wanted for something else.
+
+## Re-ingest speed: where the time actually goes (16 Sep, measured)
+
+The rebuild runs at ~26s per colourway. Profiled, that splits as:
+
+    _preprocess_image (rembg + crop)      0.51s per photo
+    get_augmented_embeddings (6 passes)   0.25s per photo
+    -> real work, 7 photos                 5.3s
+    everything else                       ~20s   <- downloading
+
+So it is bandwidth-bound, not CPU-bound. The originals are DSLR frames around
+16MB; seven of them is ~110MB per colourway. Parallel workers do not help because
+the limit is total throughput, not concurrency. Two hypotheses were checked and
+both were wrong: MPS is already in use (Apple M3), and per-thread `authenticate()`
+costs only 0.16s, not the seconds assumed.
+
+`_preprocess_image` downscales to 1024px on the long edge as its first step, so
+nearly all of those bytes are fetched only to be discarded. Drive will serve its
+own rendition via `thumbnailLink`. Measured on 3 real catalogue photos, cosine of
+the resulting embedding against the full-resolution download:
+
+    full   16.13MB  2.89s  1.00000
+    s1024   0.17MB  0.78s  0.98007
+    s1600   0.39MB  0.75s  0.99345
+    s2048   0.60MB  1.48s  0.99730
+    s4096   1.85MB  2.22s  0.99504
+
+s2048 is 27x smaller and effectively indistinguishable; it would take the rebuild
+from ~26s to ~7s per colourway, i.e. roughly 5.5 hours down to 1.5.
+
+**Not applied.** Switching mid-run would leave the first ~494 colourways built from
+full-resolution files and the rest from renditions -- a systematic 0.27% offset
+across half the catalogue, against typical winning margins of 0.02-0.03. The run
+was left on full-resolution downloads for a uniform index. Worth using for the
+NEXT full rebuild, where every product goes through the same path.
