@@ -29,6 +29,8 @@ import time
 import argparse
 import logging
 import difflib
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import requests
@@ -145,6 +147,44 @@ def download_image(service, file_id):
         _, done = api_call(lambda: downloader.next_chunk())
     buf.seek(0)
     return Image.open(buf).convert("RGB")
+
+
+# googleapiclient's service object wraps a single httplib2.Http, which is not thread-safe,
+# so each worker thread builds and keeps its own.
+_local = threading.local()
+
+
+def thread_service():
+    if not hasattr(_local, "svc"):
+        _local.svc = authenticate()
+    return _local.svc
+
+
+DOWNLOAD_WORKERS = int(os.environ.get("REBUILD_DOWNLOAD_WORKERS", "8"))
+
+
+def download_images(file_ids):
+    """Fetch one colourway's photos in parallel, preserving order.
+
+    Serially this dominated the whole run: a full catalogue pass is roughly 9,000 photos
+    (518 style folders, ~2.5 colourways each, ~7 photos per colourway once the four real
+    angles and the close-ups are included) and downloads alone ran near 18 hours at about
+    8 photos a minute. Embedding is the floor at ~2.5s per photo, so there is no point
+    driving this further than a handful of workers."""
+    out = [None] * len(file_ids)
+
+    def fetch(i_fid):
+        i, fid = i_fid
+        try:
+            return i, download_image(thread_service(), fid)
+        except Exception as e:
+            logger.warning(f"  Failed to download image {fid}: {e}")
+            return i, None
+
+    with ThreadPoolExecutor(max_workers=min(DOWNLOAD_WORKERS, max(1, len(file_ids)))) as ex:
+        for i, img in ex.map(fetch, list(enumerate(file_ids))):
+            out[i] = img
+    return [im for im in out if im is not None]
 
 
 def collect_style_variants(service, style):
@@ -296,12 +336,7 @@ def main():
             if product_name in already_done:
                 continue
 
-            pil_images = []
-            for fid in file_ids:
-                try:
-                    pil_images.append(download_image(service, fid))
-                except Exception as e:
-                    logger.warning(f"  Failed to download image {fid} for {product_name}: {e}")
+            pil_images = download_images(file_ids)
 
             if not pil_images:
                 continue
@@ -322,7 +357,7 @@ def main():
                 logger.info(
                     f"[{si}/{len(styles)}] {product_name}: +{n} embeddings "
                     f"({len(pil_images)} imgs) | total products so far: {total_products_done} | "
-                    f"elapsed: {elapsed/60:.1f}m"
+                    f"imgs: {total_images_embedded} | elapsed: {elapsed/60:.1f}m"
                 )
                 if total_products_done % 50 == 0:
                     logger.info("  Checkpoint: pushing to HF Dataset (no-op if HF_TOKEN unset)...")
