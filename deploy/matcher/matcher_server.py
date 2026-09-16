@@ -112,9 +112,22 @@ async def verify_dress(files: List[UploadFile] = File(...)):
         keypoint_inliers = await run_in_threadpool(matcher.verify_with_keypoints, pil_images, matched_name)
     keypoint_verified = (keypoint_inliers >= MIN_INLIERS_FOR_KEYPOINT_VERIFIED) if keypoint_inliers is not None else None
 
-    confidence = "low" if is_close_call else "high"
-    if keypoint_verified is False:  # explicit check, not just falsy -- None means "couldn't check"
+    # Confidence is driven by the KEYPOINT check first and the margin only as a fallback.
+    # Measured 2026-09-16 on n=91 real held-out photos over the 34 most confusable designs
+    # (see MIN_INLIERS_FOR_KEYPOINT_VERIFIED for the full method). Precision of a "high":
+    #     keypoint (>=12 inliers) : 47/47  = 100%
+    #     margin only             : 15/16  =  94%
+    #     margin AND keypoint@30  :  8/9   =  89%   <- what this used to do
+    # The old rule ANDed the two, so a genuine match that happened to be a close call was
+    # downgraded even when the keypoints confirmed it outright. Keypoints win when they
+    # have an answer; margin is consulted only when they don't (no thumbnail for this
+    # product yet, or ORB threw).
+    if keypoint_verified is True:
+        confidence = "high"
+    elif keypoint_verified is False:
         confidence = "low"
+    else:  # None -- couldn't check; fall back to the margin signal
+        confidence = "low" if is_close_call else "high"
 
     return {
         "similarity": float(similarity),

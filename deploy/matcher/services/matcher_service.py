@@ -54,19 +54,28 @@ KEYPOINT_RERANK_CLOSE_CALL_RATIO = 0.97
 
 # Minimum ORB inlier count (see _best_orb_score) for the top pick to count as
 # "keypoint-verified" — an absolute sanity check on a SINGLE candidate, distinct from
-# _keypoint_rerank's relative comparison between two close candidates. Added
-# 2026-09-10 to catch the case a margin-based confidence can't: an out-of-catalog
-# garment that happens to land close to one catalog item on embedding similarity
-# alone (e.g. 0.89, with no other candidate close enough to look like a "close call")
-# would otherwise be reported as a confident match. Threshold picked from the same
-# 2026-09-10 measurements used to validate _keypoint_rerank: wrong/different-design
-# pairs topped out at ~12 inliers even under brightness/rotation variation, while
-# genuine matches (same augmentations) never dropped below ~570 — 30 sits with wide
-# margin on both sides of that gap, favoring NOT falsely flagging a real match over
-# catching every possible false one. Unvalidated against real customer photos (only
-# synthetic augmentation + real catalog photos so far) — a starting point, not a
-# tuned number; revisit if real usage shows it firing on genuine matches.
-MIN_INLIERS_FOR_KEYPOINT_VERIFIED = 30
+# _keypoint_rerank's relative comparison between two close candidates.
+#
+# RE-TUNED 2026-09-16: 30 -> 12, from the first measurement against REAL photographs.
+# The original 30 came from synthetic augmentation of catalogue renders, where genuine
+# matches scored ~570+ inliers. Real photos do not behave like that at all. Measured on
+# n=91 held-out real front-angle shots across the 34 most mutually-confusable designs
+# (real photos from Drive's colour subfolders, which are NOT in the index — only the
+# ai/ renders are):
+#
+#     wrong matches  : 3..11 inliers   (never once exceeded 11)
+#     correct matches: 2..186 inliers, median 19.5
+#
+# At 30 the check rejected all 15 wrong matches but ALSO rejected 47 of 72 correct ones
+# (65%), so keypoint_verified was False on the majority of genuine matches and the
+# confidence field collapsed to "low" on 82 of 91 calls — useless to the returns desk.
+# At 12 it still rejects 15/15 wrong matches while keeping 47/72 correct: on that
+# sample, keypoint_verified=True was right 47/47 times (100% precision). Anything in
+# 12..13 separates the two populations; 12 keeps the most correct matches.
+#
+# Caveat: n=91 on a deliberately adversarial slice, front angle only. Re-measure before
+# moving it again, and treat the 100% figure as "no counterexample yet", not a guarantee.
+MIN_INLIERS_FOR_KEYPOINT_VERIFIED = 12
 
 # Comprehensive product-to-standard color mappings for offline tie-breaking
 COLOR_MAP = {
