@@ -228,3 +228,42 @@ was wrong — do not retry it.
 Note what this implies for #2: if six *synthetic* variants of a single render are
 worth +5.5pp over the render alone, four *real* photographed angles per colourway
 should be worth more. #2 is now the best-evidenced remaining lever.
+
+## Verified on prod after the fix (rev 00010, same 91 photos)
+
+                          BEFORE (t=30)        AFTER (t=12)
+    confidence=high       9 cases,  88.9%     48 cases,  97.9%
+    confidence=low       82 cases,  81.7%     43 cases,  65.1%
+    keypoint_verified    True=25 False=62     True=47 False=40
+    accuracy (full)           75/91               75/91
+    match decisions changed:  0
+
+Accuracy is unchanged by design — the threshold only governs what gets reported,
+not what gets picked. What changed is that the signal became usable:
+
+- **53% of calls are now "high" at 97.9% precision** (was 10% of calls), so the
+  returns desk can act on roughly half of them without a second look.
+- **15 of the 16 actual errors land in "low"** — 94% of errors caught by the flag.
+
+Before the fix, "low" covered 90% of all calls and was right 81.7% of the time,
+which is barely different from the 82.4% base rate — i.e. the field carried
+almost no information.
+
+## What is actually left for accuracy
+
+Accuracy on this slice is 82.4% and none of today's work moved it. The levers,
+in order of evidence:
+
+1. **#2, index the real photographs.** Now the best-evidenced option: the
+   ablation shows six synthetic variants of one render are worth +5.5pp over the
+   render alone, so four real angles per colourway should beat that. Note the
+   index still holds ~1 image per product (6432 vectors / 1068 products = 6.02).
+2. **Target DESIGN discrimination, not colourway.** 12 of 16 errors are design
+   errors. #3/#4 above are aimed at the smaller half of the problem.
+3. Prod's `search()` still uses a flat `k=500`. At ~5x the vectors that is 1.6%
+   of the index and recall will drop. EXPERIMENT #3 in
+   matcher_service_experimental.py already has dynamic k — port it WITH #2.
+
+Also still true: the local index (6432 vectors / 1068 products) lags prod
+(8118 / 1129), and thumbnails.tar.gz covers 1047 of prod's 1129 products, so
+~82 products return null keypoints until a fresh push.
