@@ -22,3 +22,5 @@ data/matcher/thumbnails/
 data/matcher_test_experimental/
 # Timestamped state backups
 *.bak-*
+# Real-photo eval set built by scripts/build_real_photo_evalset.py (large JPEGs + embeddings)
+data/matcher_eval/

@@ -143,3 +143,88 @@ Also worth building: a small eval slice of **real customer/floor photos**, not
 catalogue shots. Everything measured so far is studio-vs-studio;
 `MIN_INLIERS_FOR_KEYPOINT_VERIFIED = 30` is explicitly flagged in the code as
 never validated against real customer photos.
+
+---
+
+# RESULTS — 16 Sep 2026
+
+Prod was redeployed (rev 00009) after finding the keypoint layer had been dead
+since 10 Sep: `deploy/matcher/` is a manual copy and still held the pre-19:43
+`snapshot_download` version of `pull_thumbnails()`, so thumbnails never reached
+the container. Confirmed by grep — the deployed build context had **zero**
+occurrences of `THUMBNAILS_ARCHIVE_NAME`. `thumbnails.tar.gz` (49MB) has since
+been pushed to the HF dataset repo.
+
+## First real-photo measurement (n=91)
+
+Method, and it differs from everything before it: 91 held-out **real front-angle
+photographs** taken from Drive's per-colour subfolders (`<design>-m/<colour>/f.JPG`)
+across the 34 most mutually-confusable designs. These photos are **not in the
+index** — only the `ai/` renders are. Ground truth from the folder path.
+Confusability was computed offline from the FAISS index itself
+(max cos-sim between every pair of products), not guessed.
+
+    full (design+colour)   75/91   82.4%
+    design                 79/91   86.8%
+    colour | design right  75/79   94.9%
+
+Adversarial slice, so a floor rather than a catalogue-wide average.
+
+## #5 was right that a blended number hides the failure — but it hides the OPPOSITE one
+
+    colour wrong (design right):   4
+    design wrong              :   12
+
+**Design confusion outnumbers colour confusion 3 to 1.** Sections #3 and #4 above
+are built on the premise that same-design colourway ties are the core unsolved
+gap. On real photographs that premise does not hold — colour is 94.9% correct.
+Retarget the fine-tuning objective accordingly before investing in it.
+
+## MIN_INLIERS_FOR_KEYPOINT_VERIFIED was wrong by ~2.5x (fixed)
+
+    wrong matches    3..11 inliers   (never once above 11, n=15)
+    correct matches  2..186 inliers, median 19.5
+
+The original 30 came from synthetic augmentation, where genuine matches scored
+~570+. At 30 the check rejected all 15 wrong matches but also 47 of 72 correct
+ones, so `confidence` was "low" on 82 of 91 calls. Now 12: still rejects 15/15
+wrong, keeps 47/72 correct, and all 47 were genuinely correct.
+
+Precision of a "high confidence" verdict:
+
+    keypoint (>=12)          47/47   100%
+    margin only              15/16    94%
+    margin AND keypoint@30    8/9     89%   <- what shipped before
+
+Confidence now consults keypoints first, margin only as fallback.
+
+## The ORB re-rank is net zero on real photos (#1's +1.2pp does not reproduce)
+
+7 of 91 queries had their embedding answer overridden by `_keypoint_rerank`:
+1 improved, 1 regressed, 5 were wrong either way. The 84.5% -> 85.7% measured on
+10 Sep was render-vs-render. Left enabled, but it is not currently earning its
+latency.
+
+## Brightness augmentation: hypothesis TESTED and REJECTED
+
+Proposed that `get_augmented_embeddings`' Brightness(1.25)/Brightness(0.75),
+combined with per-product `max()` scoring, was manufacturing the PISTA/GOLD and
+PEACH/PINK confusions. Tested offline by masking vector positions (each product
+is a consecutive 6-vector block: 0=original 1=mirror 2=bright+ 3=bright- 4=rot+
+5=rot-), so no re-embedding was needed:
+
+    ALL 6 (current)            full 82.4%   design 86.8%
+    drop both brightness       full 79.1%   design 84.6%    -3 / -2
+    drop bright+1.25 only      full 79.1%   design 84.6%    -3 / -2
+    drop bright-0.75 only      full 82.4%   design 86.8%     0 /  0
+    drop rotations             full 79.1%   design 82.4%    -3 / -4
+    drop mirror                full 81.3%   design 86.8%    -1 /  0
+    original + mirror only     full 74.7%   design 79.1%    -7 / -7
+    original only              full 76.9%   design 80.2%    -5 / -6
+
+**Every augmentation helps; removing any of them costs accuracy.** The hypothesis
+was wrong — do not retry it.
+
+Note what this implies for #2: if six *synthetic* variants of a single render are
+worth +5.5pp over the render alone, four *real* photographed angles per colourway
+should be worth more. #2 is now the best-evidenced remaining lever.
