@@ -322,3 +322,17 @@ Keep every view and add to it; never swap one view for another.
   matcher_service_experimental.py already has `max(500, unique_products * 10)`.
 - Full re-ingest is ~4,500 Drive downloads, roughly 8 hours at the observed rate.
   One-off, best run overnight.
+
+## Close-ups (lc/): tested, no benefit — skip them
+
+Drive's `lc/` close-ups were colour-assigned by EXIF shot time (see
+`scripts/download_lc_closeups.py`; the assignment is sound — every assigned
+colourway got exactly 2, up and down, across 73 of 91).
+
+    AI + other 3 angles    302/364  83.0%   design 313/364  86.0%
+    + close-ups            300/364  82.4%   design 313/364  86.0%
+
+Two cases worse, design accuracy identical. `_preprocess_image` already crops
+20%/15% inward, so a close-up ends up as an extreme zoom that no longer resembles
+a full-garment query. Not worth doubling the ingest. Keep the script — it works,
+and the EXIF trick is reusable if close-ups are ever wanted for something else.
