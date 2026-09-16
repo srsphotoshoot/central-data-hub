@@ -267,3 +267,58 @@ in order of evidence:
 Also still true: the local index (6432 vectors / 1068 products) lags prod
 (8118 / 1129), and thumbnails.tar.gz covers 1047 of prod's 1129 products, so
 ~82 products return null keypoints until a fresh push.
+
+---
+
+# THE ANGLE FINDING — 16 Sep 2026
+
+The catalogue indexes exactly one AI render per colourway. Nobody had ever tested
+what happens when the query is shot from a different side, because every previous
+eval used front or catalogue views. It turns out that is where the system fails.
+
+Leave-one-angle-out, n=91 colourways x 4 angles = 364 queries. Index holds the AI
+render plus three real angles; the fourth angle is held out and used as the query.
+The other 977 products keep their renders untouched as distractors.
+
+    held-out angle   AI render only (today)   AI + other 3 angles
+    f (front)         75/91   82.4%            81/91   89.0%     +6.6
+    b (back)          51/91   56.0%            74/91   81.3%    +25.3
+    l (left)          34/91   37.4%            71/91   78.0%    +40.6
+    r (right)         47/91   51.6%            76/91   83.5%    +31.9
+
+    OVERALL          207/364  56.9%           302/364  83.0%    +26.1
+    design           225/364  61.8%           313/364  86.0%    +24.2
+
+**Production today is 82.4% on a front photo and 37.4% on a left-side photo.**
+The headline 82.4% figure everyone has been quoting is the best case, not the
+average. Real traffic is not all front views.
+
+## A wrong turn worth recording, so it is not repeated
+
+The first cut of this experiment removed the AI render from the tested colourways
+and indexed only the real angles:
+
+    C  index AI render    query real f photo   82.4%
+    A  index f+b+l+r      query AI render      70.3%   (-12)
+    B  index b+l+r        query real f photo   69.2%   (-13)
+
+Read naively that says "real angles are worse". It does not. Deleting the render
+removed the only view resembling the query, so it measured "can a back view stand
+in for a front view" (no) rather than "does having more views help" (yes, a lot).
+The control gave it away: with the query's own angle present, accuracy was 98.9%.
+
+Different angles of one garment are NOT interchangeable -- they are additive.
+Keep every view and add to it; never swap one view for another.
+
+## What this means for the rebuild
+
+- Extend `rebuild_matcher_index.py` to walk the colour subfolders (`f/b/l/r.JPG`)
+  in addition to `ai/`. Keep the render.
+- Index goes from 1129 x 1 image to 1129 x 5 (render + 4 angles): 8,118 -> ~34,000
+  vectors at 6x augmentation. ~100MB, fine for IndexFlatIP in 8Gi.
+- `k=500` MUST become dynamic first. At 34,000 vectors a flat 500 scans 1.5% of the
+  index (it is 6% today) and recall will fall -- which would look like "real photos
+  made it worse" and wrongly discredit this result. EXPERIMENT #3 in
+  matcher_service_experimental.py already has `max(500, unique_products * 10)`.
+- Full re-ingest is ~4,500 Drive downloads, roughly 8 hours at the observed rate.
+  One-off, best run overnight.

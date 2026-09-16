@@ -37,7 +37,7 @@ blocks = defaultdict(list)
 for i in sorted(labels): blocks[labels[i]].append(i)
 
 AE = np.load(os.path.join(EV, "angle_emb.npy"))
-meta = json.load(open(os.path.join(EV, "angle_meta.json")))
+meta = json.load(open(os.path.join(EV, "angle_emb_meta.json")))
 a_owner = np.array(meta["owners"]); a_angle = np.array(meta["angles"])
 
 man = json.load(open(os.path.join(EV, "manifest.json")))

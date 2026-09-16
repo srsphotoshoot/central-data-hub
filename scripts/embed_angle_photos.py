@@ -21,15 +21,22 @@ EV = os.environ.get("EVAL_DIR", os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "matcher_eval"))
 
 matcher.load_model()                       # no load_db() -> no faiss index read
-ang = json.load(open(os.path.join(EV, "angles.json")))
+SRC = sys.argv[1] if len(sys.argv) > 1 else "angles"   # "angles" (f/b/l/r) or "lc"
+OUTNAME = "angle_emb" if SRC == "angles" else "lc_emb"
+
+if SRC == "lc":
+    ang = json.load(open(os.path.join(EV, "lc.json")))
+else:
+    ang = json.load(open(os.path.join(EV, "angles.json")))
 
 # The f (front) photos were already downloaded as the eval queries and live in
 # manifest.json, not angles.json -- fold them in so all four angles get embedded
 # together. Config B in stage 2 then simply excludes angle "f" from the index.
-have = {(a["gt"], a["angle"]) for a in ang}
-for m in json.load(open(os.path.join(EV, "manifest.json"))):
-    if (m["gt"], "f") not in have and os.path.exists(m["file"]):
-        ang.append({"file": m["file"], "gt": m["gt"], "angle": "f"})
+if SRC == "angles":
+    have = {(a["gt"], a["angle"]) for a in ang}
+    for m in json.load(open(os.path.join(EV, "manifest.json"))):
+        if (m["gt"], "f") not in have and os.path.exists(m["file"]):
+            ang.append({"file": m["file"], "gt": m["gt"], "angle": "f"})
 
 from collections import Counter
 print(f"embedding {len(ang)} photos x 6 augmentations  "
@@ -48,6 +55,6 @@ for k, a in enumerate(ang, 1):
         print(f"  {k}/{len(ang)} ({time.time()-t0:.0f}s)", file=sys.stderr, flush=True)
 
 V = np.vstack(vecs).astype(np.float32); V /= (np.linalg.norm(V, axis=1, keepdims=True) + 1e-8)
-np.save(os.path.join(EV, "angle_emb.npy"), V)
-json.dump({"owners": owners, "angles": angles}, open(os.path.join(EV, "angle_meta.json"), "w"))
+np.save(os.path.join(EV, OUTNAME + ".npy"), V)
+json.dump({"owners": owners, "angles": angles}, open(os.path.join(EV, OUTNAME + "_meta.json"), "w"))
 print(f"saved {V.shape} ({len(set(owners))} colourways)", file=sys.stderr)
